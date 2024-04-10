@@ -1,5 +1,8 @@
+#Project: InvestmentPortfolio
+#Version: 1.09
+
 #--------------- Library Management ---------------
-packages_needed <- c("shiny", "renv", "shinydashboard", "quantmod", "xts", "zoo","ROI","DT","dplyr","PerformanceAnalytics", "TTR", "PortfolioAnalytics","plotly", "lubridate", "ggplot2", "reshape2", "shinythemes")
+packages_needed <- c("renv", "shiny", "shinyjs", "shinydashboard", "quantmod", "xts", "zoo","ROI","DT","dplyr","PerformanceAnalytics", "TTR", "PortfolioAnalytics","plotly", "lubridate", "ggplot2", "reshape2", "shinythemes")
 new_packages <- packages_needed[!packages_needed %in% installed.packages()[, "Package"]]
 if (length(new_packages)) install.packages(new_packages)
 lapply(packages_needed, library, character.only = TRUE)
@@ -25,6 +28,10 @@ getNormalizedWeights <- function(symbol_weights) {
 }
 
 simulatePortfolio <- function(initial_weights, combined_returns) {
+  if(is.null(initial_weights) || length(initial_weights) == 0 || sum(is.na(initial_weights)) > 0 || sum(initial_weights) == 0) {
+    return(NULL)  # Return NULL or another safe value indicating an error or incomplete state
+  }
+  
   num_assets <- length(initial_weights)
   portfolio_values <- rep(NA, nrow(combined_returns))
   weights <- matrix(NA, nrow = nrow(combined_returns), ncol = num_assets, dimnames = list(NULL, names(initial_weights)))
@@ -55,6 +62,9 @@ simulatePortfolio <- function(initial_weights, combined_returns) {
 }
 
 #--------------- UI Definition ---------------
+# Define the JavaScript code
+jsCode <- "shinyjs.runAnalysis = function() { $('#runAnalysis').click(); }"
+
 ui <- dashboardPage(
   dashboardHeader(title = "Investment Portfolio Analysis"),
   dashboardSidebar(
@@ -64,15 +74,21 @@ ui <- dashboardPage(
       menuItem("Efficient Frontier", tabName = "efficientFrontier", icon = icon("line-chart"))
     ),
     actionButton("runAnalysis", "Run Analysis", class = "btn-primary"),
-    dateInput("startDate", "Start Date", value = "2014-01-01"),
+    dateInput("startDate", "Start Date", value = "2023-12-31"),
     dateInput("endDate", "End Date", value = Sys.Date()),
     selectInput("symbols", "Symbols", choices = c("SPY", "AGG", "QQQ", "IWM", "EFA", "EEM", "TLT", "IEF", "LQD", "GLD"), multiple = TRUE, selected = c("SPY", "AGG")),
     uiOutput("benchmarkWeightsUI"),
     uiOutput("fundWeightsUI")
   ),
   dashboardBody(
+    useShinyjs(),
+    extendShinyjs(text = jsCode, functions = c("runAnalysis")),
     tabItems(
       tabItem(tabName = "analysis",
+              conditionalPanel(
+                condition = "output.loading === true",
+                tags$div(class = "loading-message", "Loading data... Please wait.")
+              ),
               fluidRow(
                 box(plotOutput("performanceComparisonPlot"), title = "Performance Comparison", width = 12)
               ),
@@ -98,33 +114,72 @@ ui <- dashboardPage(
 
 #--------------- Server Logic ---------------
 server <- function(input, output, session) {
+  # Initialize reactive value for loading state
+  loading_state <- reactiveVal(TRUE)
+  
+  # Output for conditionalPanel to listen to for showing/hiding loading message
+  output$loading <- reactive({ loading_state() })
+  outputOptions(output, "loading", suspendWhenHidden = FALSE)
+  
+  # Set default values and trigger data loading immediately
+  observe({
+    updateSelectInput(session, "symbols", selected = c("SPY", "AGG"))
+    
+    # Ensure default weights are set for both benchmark and fund weights
+    lapply(c("SPY", "AGG"), function(sym) {
+      updateNumericInput(session, paste0("benchmarkWeight", sym), value = ifelse(sym == "SPY", 0.6, 0.4))
+      updateNumericInput(session, paste0("fundWeight", sym), value = ifelse(sym == "SPY", 1, 0))
+    })
+    
+    # Set loading state to TRUE right before fetching data
+    loading_state(TRUE)
+    
+    # Programmatic click to trigger analysis
+    shinyjs::runjs('$("#runAnalysis").click();')
+  })
+  
+  # UI for setting benchmark weights
   output$benchmarkWeightsUI <- renderUI({
     req(input$symbols)
-    lapply(1:length(input$symbols), function(i) {
-      numericInput(inputId = paste0("benchmarkWeight", input$symbols[i]),
-                   label = paste("Benchmark Weight for", input$symbols[i]),
-                   value = 1 / length(input$symbols), min = 0, max = 1, step = 0.01)
+    lapply(input$symbols, function(sym) {
+      numericInput(inputId = paste0("benchmarkWeight", sym),
+                   label = paste("Benchmark Weight for", sym),
+                   value = ifelse(sym == "SPY", 0.6, ifelse(sym == "AGG", 0.4, 1 / length(input$symbols))),
+                   min = 0, max = 1, step = 0.01)
     })
   })
   
+  # UI for setting fund weights
   output$fundWeightsUI <- renderUI({
     req(input$symbols)
-    lapply(1:length(input$symbols), function(i) {
-      numericInput(inputId = paste0("fundWeight", input$symbols[i]),
-                   label = paste("Fund Weight for", input$symbols[i]),
-                   value = 1 / length(input$symbols), min = 0, max = 1, step = 0.01)
+    lapply(input$symbols, function(sym) {
+      numericInput(inputId = paste0("fundWeight", sym),
+                   label = paste("Fund Weight for", sym),
+                   value = ifelse(sym == "SPY", 1, 0),  # Default to 100% SPY, 0% everything else
+                   min = 0, max = 1, step = 0.01)
     })
   })
   
+  # Reactive expression to fetch symbol data based on user inputs
   symbolData <- eventReactive(input$runAnalysis, {
     req(input$symbols, input$startDate, input$endDate)
-    tryCatch({
+    
+    # Attempt to fetch data, with error handling
+    data <- tryCatch({
       lapply(input$symbols, function(sym) {
         getSymbols(sym, src = "yahoo", from = input$startDate, to = input$endDate, auto.assign = FALSE)
       })
     }, error = function(e) {
-      stop("Error fetching symbol data: ", e$message)
+      # On error, log and return NULL to prevent downstream errors
+      print(paste("Error fetching symbol data:", e$message))
+      NULL
     })
+    
+    # Data fetching complete, set loading state to FALSE
+    loading_state(FALSE)
+    
+    # Return fetched data
+    data
   }, ignoreNULL = FALSE)
   
   combinedReturns <- eventReactive(input$runAnalysis, {
@@ -134,18 +189,22 @@ server <- function(input, output, session) {
   }, ignoreNULL = FALSE)
   
   portfolioSimulation <- eventReactive(input$runAnalysis, {
-    req(input$symbols, combinedReturns())
-    benchmark_weights <- sapply(input$symbols, function(sym) as.numeric(input[[paste0("benchmarkWeight", sym)]]))
-    fund_weights <- sapply(input$symbols, function(sym) as.numeric(input[[paste0("fundWeight", sym)]]))
-    
-    benchmark_weights <- getNormalizedWeights(benchmark_weights)
-    fund_weights <- getNormalizedWeights(fund_weights)
-    
-    benchmark_portfolio <- simulatePortfolio(benchmark_weights, combinedReturns())
-    fund_portfolio <- simulatePortfolio(fund_weights, combinedReturns())
-    
-    list(benchmark = benchmark_portfolio, fund = fund_portfolio)
-  }, ignoreNULL = FALSE)
+  # Use req to ensure that all required inputs are available before proceeding
+  req(input$symbols, input$startDate, input$endDate)
+  req(sapply(input$symbols, function(sym) input[[paste0("benchmarkWeight", sym)]]))
+  req(sapply(input$symbols, function(sym) input[[paste0("fundWeight", sym)]]))
+
+  benchmark_weights <- sapply(input$symbols, function(sym) as.numeric(input[[paste0("benchmarkWeight", sym)]]))
+  fund_weights <- sapply(input$symbols, function(sym) as.numeric(input[[paste0("fundWeight", sym)]]))
+
+  benchmark_weights <- getNormalizedWeights(benchmark_weights)
+  fund_weights <- getNormalizedWeights(fund_weights)
+
+  benchmark_portfolio <- simulatePortfolio(benchmark_weights, combinedReturns())
+  fund_portfolio <- simulatePortfolio(fund_weights, combinedReturns())
+
+  list(benchmark = benchmark_portfolio, fund = fund_portfolio)
+}, ignoreNULL = FALSE)
   
   output$benchmarkAllocationPlot <- renderPlot({
     req(portfolioSimulation())
@@ -200,7 +259,8 @@ server <- function(input, output, session) {
   
   #--------------- Performance Metrics Table Rendering ---------------
   output$performanceMetricsTable <- DT::renderDataTable({
-    req(portfolioSimulation())
+    sim_results <- req(portfolioSimulation())
+    req(!is.null(sim_results$benchmark$values_xts) && !is.null(sim_results$fund$values_xts))
     
     benchmark_returns <- dailyReturn(portfolioSimulation()$benchmark$values_xts)
     fund_returns <- dailyReturn(portfolioSimulation()$fund$values_xts)
@@ -298,9 +358,11 @@ server <- function(input, output, session) {
              yaxis = list(title = 'Annual Return'),
              hovermode = 'closest')
   })
+  
+  # Once the app is initialized, trigger the data fetch
+  observe({
+    shinyjs::runjs('$("#runAnalysis").click();')
+  })
 }
 
 shinyApp(ui = ui, server = server)
-
-
-#------------TESTING
