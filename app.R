@@ -1,5 +1,5 @@
 #Project: InvestmentPortfolio
-#Version: 1.09
+#Version: 1.13
 
 #--------------- Library Management ---------------
 packages_needed <- c("renv", "shiny", "shinyjs", "shinydashboard", "quantmod", "xts", "zoo","ROI","DT","dplyr","PerformanceAnalytics", "TTR", "PortfolioAnalytics","plotly", "lubridate", "ggplot2", "reshape2", "shinythemes")
@@ -61,6 +61,62 @@ simulatePortfolio <- function(initial_weights, combined_returns) {
   return(list(values_xts = xts(portfolio_values, order.by=index(combined_returns)), weights_xts = xts(weights, order.by=index(combined_returns))))
 }
 
+#--------------- CPPI Strategy Implementation ---------------
+calculateCPPI <- function(risky_returns, riskfree_returns, initial_value, floor_percentage, multiplier) {
+  floor_value <- initial_value * floor_percentage
+  portfolio_value <- initial_value
+  cushion <- portfolio_value - floor_value
+  allocation_to_risky <- cushion * multiplier
+  
+  # Ensure allocation does not exceed total portfolio value
+  allocation_to_risky <- min(allocation_to_risky, portfolio_value)
+  allocation_to_riskfree <- portfolio_value - allocation_to_risky
+  
+  # Initial allocations
+  risky_value <- allocation_to_risky
+  riskfree_value <- allocation_to_riskfree
+  
+  # Arrays to store portfolio values over time
+  portfolio_values <- numeric(length(risky_returns))
+  portfolio_values[1] <- portfolio_value
+  
+  # Simulation over time
+  for (i in 2:length(risky_returns)) {
+    risky_value <- risky_value * (1 + risky_returns[i])
+    riskfree_value <- riskfree_value * (1 + riskfree_returns[i])
+    
+    portfolio_value <- risky_value + riskfree_value
+    cushion <- max(0, portfolio_value - floor_value)
+    allocation_to_risky <- min(cushion * multiplier, portfolio_value)
+    allocation_to_riskfree <- portfolio_value - allocation_to_risky
+    
+    risky_value <- allocation_to_risky
+    riskfree_value <- allocation_to_riskfree
+    
+    portfolio_values[i] <- portfolio_value
+  }
+  
+  return(portfolio_values)
+}
+
+#--------------- CPPI Tab UI Function Definition ---------------
+cppiTabUI <- function() {
+  tabItem(tabName = "cppi",
+          fluidRow(
+            box(plotOutput("cppiPerformancePlot"), title = "CPPI vs Benchmark Performance", width = 12)
+          ),
+          fluidRow(
+            column(4,
+                   numericInput("multiplier", "Multiplier", value = 3, min = 0, max = 50),
+                   numericInput("floorPercentage", "Floor Percentage", value = 80, min = 0, max = 100)
+            ),
+            column(8,
+                   box(DT::dataTableOutput("cppiPerformanceMetricsTable"), title = "Performance Metrics", width = 12)
+            )
+          )
+  )
+}
+
 #--------------- UI Definition ---------------
 # Define the JavaScript code
 jsCode <- "shinyjs.runAnalysis = function() { $('#runAnalysis').click(); }"
@@ -71,7 +127,9 @@ ui <- dashboardPage(
     sidebarMenu(
       menuItem("Analysis", tabName = "analysis", icon = icon("dashboard")),
       menuItem("Allocation", tabName = "allocation", icon = icon("area-chart")),
-      menuItem("Efficient Frontier", tabName = "efficientFrontier", icon = icon("line-chart"))
+      menuItem("Efficient Frontier", tabName = "efficientFrontier", icon = icon("line-chart")),
+      menuItem("CPPI Info", tabName = "cppiInfo", icon = icon("info-circle")),
+      menuItem("CPPI", tabName = "cppi", icon = icon("rocket"))
     ),
     actionButton("runAnalysis", "Run Analysis", class = "btn-primary"),
     dateInput("startDate", "Start Date", value = "2023-12-31"),
@@ -83,7 +141,9 @@ ui <- dashboardPage(
   dashboardBody(
     useShinyjs(),
     extendShinyjs(text = jsCode, functions = c("runAnalysis")),
+    tags$head(tags$script(src = "https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.7/MathJax.js?config=TeX-AMS_HTML")),
     tabItems(
+      # Tab for Analysis
       tabItem(tabName = "analysis",
               conditionalPanel(
                 condition = "output.loading === true",
@@ -96,17 +156,44 @@ ui <- dashboardPage(
                 box(DT::dataTableOutput("performanceMetricsTable"), title = "Performance Metrics", width = 12)
               )
       ),
+      # Tab for Allocation
       tabItem(tabName = "allocation",
               fluidRow(
                 box(plotOutput("benchmarkAllocationPlot"), title = "Benchmark Allocation", width = 6),
                 box(plotOutput("fundAllocationPlot"), title = "Fund Allocation", width = 6)
               )
       ),
+      # Tab for Efficient Frontier
       tabItem(tabName = "efficientFrontier",
               fluidRow(
                 box(plotlyOutput("efficientFrontierPlot"), title = "Efficient Frontier", width = 12)
               )
-      )
+      ),
+      tabItem(tabName = "cppiInfo",
+              h2("Constant Proportion Portfolio Insurance (CPPI)"),
+              p("The Constant Proportion Portfolio Insurance (CPPI) is a dynamic investment strategy that adjusts the exposure between a risky asset and a safe asset to protect against significant losses while allowing for upside potential. It's designed to prevent the portfolio value from dropping below a specified floor, effectively combining the growth opportunities of risky investments with the security of risk-free assets."),
+              h4("Performance in Different Market Environments:"),
+              p("CPPI performs well in trending markets, whether upwards or downwards, due to its mechanism of increasing exposure to risky assets as their value rises and decreasing it as they fall. However, it may underperform in highly volatile markets with no clear trend, as the frequent adjustments between asset allocations can lead to suboptimal outcomes, particularly if transaction costs are significant."),
+              h4("Parameters and Formula:"),
+              p("Floor Value (F): The minimum portfolio value that the strategy aims to protect."),
+              p("Cushion (C): The difference between the current portfolio value (V) and the floor value."),
+              p("Multiplier (m): A factor that determines the level of investment in the risky asset, based on the cushion."),
+              tags$div(HTML("Investment in Risky Asset = Cushion × Multiplier = (V - F) × m")),
+              tags$div(HTML("Investment in Risk-Free Asset = Portfolio Value - Investment in Risky Asset")),
+              tags$div(HTML("$$I_{\\text{risky}} = (V - F) \\cdot m$$")),
+              tags$div(HTML("$$I_{\\text{safe}} = V - I_{\\text{risky}}$$")),
+              h4("References:"),
+              p(a("Investopedia CPPI", href="https://www.investopedia.com/terms/c/constant-proportion-portfolio-insurance.asp", target="_blank")),
+              p(a("CFA Institute", href="https://www.cfainstitute.org/en/membership/professional-development/refresher-readings/constant-proportion-portfolio-insurance", target="_blank")),
+              p(a("Risk Encyclopedia", href="http://riskencyclopedia.com/articles/constant_proportion_portfolio_insurance/", target="_blank"))
+      ),
+      cppiTabUI()
+    ),
+    # Author label and version number
+    absolutePanel(
+      bottom = 10, right = 10, 
+      style = "background: transparent; color: #555; font-size: 9px;",
+      HTML("Author: Prof.Frenzel <br> Version: 1.10")
     ),
     theme = shinytheme("sandstone")
   )
@@ -255,6 +342,72 @@ server <- function(input, output, session) {
       labs(x = "Date", y = "Portfolio Value") +
       scale_color_manual(values = c("Benchmark" = "#2C3E50", "Fund" = "#E74C3C")) +
       theme(legend.title = element_blank(), legend.position = "top")
+  })
+  
+  #--------------- CPPI Performance Plot ---------------
+  output$cppiPerformancePlot <- renderPlot({
+    req(input$multiplier, input$floorPercentage)  # Ensure inputs are available
+    
+    # Debugging: Inspect combinedReturns structure
+    print(str(combinedReturns()))
+    
+    # Check if combinedReturns has any data and the required columns
+    if (is.null(combinedReturns()) || ncol(combinedReturns()) == 0 || 
+        !("SPY" %in% colnames(combinedReturns())) || !("AGG" %in% colnames(combinedReturns()))) {
+      print("SPY or AGG data is missing or combinedReturns is empty.")
+      return()
+    }
+    
+    combined_returns <- combinedReturns()
+    
+    risky_returns <- combined_returns[,"SPY"]
+    riskfree_returns <- combined_returns[,"AGG"]
+    
+    floor_percentage <- input$floorPercentage / 100
+    
+    cppi_values <- calculateCPPI(as.numeric(risky_returns), as.numeric(riskfree_returns), 100, floor_percentage, input$multiplier)
+    
+    cppi_ts <- xts(cppi_values, order.by = index(risky_returns))
+    
+    plot(cppi_ts, main = "CPPI Strategy Performance", ylab = "Portfolio Value", col = "blue", type = 'l')
+    lines(portfolioSimulation()$benchmark$values_xts, col = "red")
+    
+    legend("topright", legend = c("CPPI Portfolio", "Benchmark"), col = c("blue", "red"), lty = 1)
+  })
+  
+  #--------------- CPPI Performance Metrics Table ---------------
+  output$cppiPerformanceMetricsTable <- DT::renderDataTable({
+    req(input$multiplier, input$floorPercentage)  # Ensure inputs are available
+    
+    # Debugging: Inspect combinedReturns structure
+    print(str(combinedReturns()))
+    
+    if (is.null(combinedReturns()) || ncol(combinedReturns()) == 0 || 
+        !("SPY" %in% colnames(combinedReturns())) || !("AGG" %in% colnames(combinedReturns()))) {
+      print("SPY or AGG data is missing or combinedReturns is empty.")
+      return()
+    }
+    
+    combined_returns <- combinedReturns()
+    
+    risky_returns <- combined_returns[,"SPY"]
+    riskfree_returns <- combined_returns[,"AGG"]
+    
+    floor_percentage <- input$floorPercentage / 100
+    
+    cppi_values <- calculateCPPI(as.numeric(risky_returns), as.numeric(riskfree_returns), 100, floor_percentage, input$multiplier)
+    
+    cppi_returns <- dailyReturn(xts(cppi_values, order.by = index(risky_returns)))
+    
+    benchmark_returns <- dailyReturn(portfolioSimulation()$benchmark$values_xts)
+    
+    cppi_metrics <- calculateAndFormatMetrics(cppi_returns, benchmark_returns)
+    benchmark_metrics <- calculateAndFormatMetrics(benchmark_returns)
+    
+    metrics_data <- rbind(CPPI = cppi_metrics, Benchmark = benchmark_metrics)
+    metrics_df <- data.frame(Metric = rownames(metrics_data), metrics_data, stringsAsFactors = FALSE)
+    
+    DT::datatable(metrics_df, options = list(pageLength = 5, autoWidth = TRUE), rownames = FALSE)
   })
   
   #--------------- Performance Metrics Table Rendering ---------------
